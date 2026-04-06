@@ -29,6 +29,7 @@ COGS = (
     "cogs.interview",
     "cogs.verification",
     "cogs.reaction_roles",
+    "cogs.staff_role_panel",
     "cogs.admin",
     "tasks.timeout_tasks",
 )

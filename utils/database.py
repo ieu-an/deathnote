@@ -50,6 +50,8 @@ class GuildSettings:
     staff_role_id: Optional[int]
     log_channel_id: Optional[int]
     interview_category_id: Optional[int]
+    staff_role_panel_channel_id: Optional[int]
+    staff_role_panel_message_id: Optional[int]
 
 
 @dataclass(frozen=True)
@@ -99,6 +101,8 @@ def _row_to_settings(row: aiosqlite.Row) -> GuildSettings:
         staff_role_id=row["staff_role_id"],
         log_channel_id=row["log_channel_id"],
         interview_category_id=row["interview_category_id"],
+        staff_role_panel_channel_id=row["staff_role_panel_channel_id"],
+        staff_role_panel_message_id=row["staff_role_panel_message_id"],
     )
 
 
@@ -174,6 +178,8 @@ class Database:
         await self._add_column_if_missing("guild_settings", "log_channel_id", "INTEGER")
         await self._add_column_if_missing("guild_settings", "interview_category_id", "INTEGER")
         await self._add_column_if_missing("guild_settings", "night_ping_role_id", "INTEGER")
+        await self._add_column_if_missing("guild_settings", "staff_role_panel_channel_id", "INTEGER")
+        await self._add_column_if_missing("guild_settings", "staff_role_panel_message_id", "INTEGER")
 
         await self._conn.execute(
             """
@@ -603,5 +609,7 @@ _ALLOWED_GUILD_COLUMNS = frozenset(
         "staff_role_id",
         "log_channel_id",
         "interview_category_id",
+        "staff_role_panel_channel_id",
+        "staff_role_panel_message_id",
     }
 )

@@ -66,7 +66,7 @@ def _interview_text_channel_overwrites(
     settings,
 ) -> dict[discord.abc.Snowflake, discord.PermissionOverwrite]:
     """
-    Private channel: @everyone cannot see; applicant + staff/botmod roles can.
+    Private channel: @everyone cannot see; applicant + staff/night/botmod roles can.
     """
     o: dict[discord.abc.Snowflake, discord.PermissionOverwrite] = {
         guild.default_role: discord.PermissionOverwrite(view_channel=False),
@@ -83,6 +83,15 @@ def _interview_text_channel_overwrites(
         sr = guild.get_role(settings.staff_role_id)
         if sr:
             o[sr] = discord.PermissionOverwrite(
+                view_channel=True,
+                send_messages=True,
+                read_message_history=True,
+                manage_messages=True,
+            )
+    if settings.night_ping_role_id:
+        nr = guild.get_role(settings.night_ping_role_id)
+        if nr:
+            o[nr] = discord.PermissionOverwrite(
                 view_channel=True,
                 send_messages=True,
                 read_message_history=True,
