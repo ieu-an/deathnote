@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from dotenv import load_dotenv
 import os
 import sys
 from pathlib import Path
