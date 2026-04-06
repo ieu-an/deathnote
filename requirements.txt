@@ -1,0 +1,8 @@
+# Discord.py 2.x with application commands (interactions)
+discord.py>=2.3.0,<3.0.0
+
+# Async SQLite for non-blocking database access
+aiosqlite>=0.19.0
+
+# IANA time zone database for zoneinfo on Windows (and other envs without system tzdata)
+tzdata>=2024.1
