@@ -81,7 +81,7 @@ class RecruitmentBot(commands.Bot):
 
 
 async def main() -> None:
-    dotenv.load_dotenv()
+    load_dotenv(_ROOT / ".env")
     token = os.getenv("DISCORD_BOT_TOKEN")
     if not token:
         LOG.error("Set DISCORD_BOT_TOKEN in your environment.")
