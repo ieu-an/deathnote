@@ -1,4 +1,4 @@
-name: Auto Deploy Deathnote Bot
+name: Auto Deploy DeathNote Bot
 
 on:
   push:
@@ -10,15 +10,10 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Deploy to VPS
+      - name: Run VPS deploy script
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
-          script: |
-            cd ~/bots/deathnote/deathnote
-            git pull origin main
-            source venv/bin/activate
-            pip install -r requirements.txt
-            sudo systemctl restart deathnotebot
+          script: ~/deploy-bot.sh
