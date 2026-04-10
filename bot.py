@@ -3,7 +3,7 @@ Entry point for the recruitment / onboarding Discord bot.
 
 Loads cogs, connects SQLite, registers persistent UI views, and syncs slash commands.
 """
-
+#deploy test
 from __future__ import annotations
 
 import asyncio
