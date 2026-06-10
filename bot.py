@@ -28,6 +28,8 @@ COGS = (
     "cogs.onboarding",
     "cogs.interview",
     "cogs.verification",
+    "cogs.squad_selection",
+    "cogs.squad_admin",
     "cogs.reaction_roles",
     "cogs.staff_role_panel",
     "cogs.admin",

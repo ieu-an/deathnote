@@ -12,6 +12,8 @@ from typing import Any, Optional
 import discord
 
 from utils.database import Application, GuildSettings
+from utils.recommendation import CONFIDENCE_HIGH, CONFIDENCE_LOW, CONFIDENCE_MEDIUM
+from utils.squads import SELECTION_MANUAL, SELECTION_RECOMMENDED, Squad, squad_by_key
 from utils.time_utils import EASTERN, format_eastern_timestamp
 
 logger = logging.getLogger(__name__)
@@ -24,6 +26,69 @@ def parse_answers(app: Application) -> dict[str, Any]:
         return {}
 
 
+def parse_questionnaire(app: Application) -> dict[str, Any]:
+    try:
+        data = json.loads(app.questionnaire_json or "{}")
+        return data if isinstance(data, dict) else {}
+    except json.JSONDecodeError:
+        return {}
+
+
+def parse_squad_scores(app: Application) -> dict[str, int]:
+    try:
+        data = json.loads(app.squad_scores_json or "{}")
+        if not isinstance(data, dict):
+            return {}
+        return {str(k): int(v) for k, v in data.items()}
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return {}
+
+
+def _squad_label(key: str, squads: Optional[list[Squad]]) -> str:
+    if not key:
+        return "—"
+    if squads:
+        squad = squad_by_key(squads, key)
+        if squad:
+            return squad.display_name
+    return key
+
+
+def _confidence_from_scores(scores: dict[str, int], chosen_key: str) -> str:
+    if not scores or not chosen_key:
+        return "—"
+    sorted_scores = sorted(scores.values(), reverse=True)
+    chosen = scores.get(chosen_key, 0)
+    if not sorted_scores:
+        return CONFIDENCE_LOW
+    best = sorted_scores[0]
+    second = sorted_scores[1] if len(sorted_scores) > 1 else 0
+    if chosen < best:
+        return CONFIDENCE_LOW
+    gap = best - second
+    if gap >= 4:
+        return CONFIDENCE_HIGH
+    if gap >= 2:
+        return CONFIDENCE_MEDIUM
+    return CONFIDENCE_LOW
+
+
+def _format_questionnaire(q: dict[str, Any]) -> str:
+    if not q:
+        return "—"
+    lines: list[str] = []
+    games = q.get("games_played")
+    if games:
+        lines.append(f"**Games played:** {', '.join(games)}")
+    if q.get("most_played"):
+        lines.append(f"**Most played:** {q['most_played']}")
+    if q.get("preferred_genre"):
+        lines.append(f"**Preferred genre:** {q['preferred_genre']}")
+    if q.get("play_frequency"):
+        lines.append(f"**Play frequency:** {q['play_frequency']}")
+    return "\n".join(lines) if lines else "—"
+
+
 def build_application_embed(
     app: Application,
     *,
@@ -31,9 +96,12 @@ def build_application_embed(
     user: Optional[discord.User],
     status_line: str,
     color: discord.Color,
+    squads: Optional[list[Squad]] = None,
 ) -> discord.Embed:
     """Build the canonical staff-facing application embed."""
     answers = parse_answers(app)
+    questionnaire = parse_questionnaire(app)
+    scores = parse_squad_scores(app)
     created = user.created_at if user else None
     joined = member.joined_at if member else None
     avatar_url = (member or user).display_avatar.url if (member or user) else None
@@ -49,6 +117,35 @@ def build_application_embed(
     uid = app.user_id
     mention = member.mention if member else f"<@{uid}>"
     embed.add_field(name="Member", value=f"{mention}\n`{uid}`", inline=False)
+
+    if app.selected_squad or app.recommended_squad or app.selection_method:
+        method_label = "—"
+        if app.selection_method == SELECTION_MANUAL:
+            method_label = "Manual"
+        elif app.selection_method == SELECTION_RECOMMENDED:
+            method_label = "Recommended"
+        embed.add_field(name="Selection method", value=method_label, inline=True)
+        embed.add_field(
+            name="Recommended squad",
+            value=_squad_label(app.recommended_squad, squads),
+            inline=True,
+        )
+        embed.add_field(
+            name="Chosen squad",
+            value=_squad_label(app.selected_squad, squads),
+            inline=True,
+        )
+        if scores:
+            score_lines = []
+            for key, score in sorted(scores.items(), key=lambda x: x[1], reverse=True):
+                label = _squad_label(key, squads)
+                score_lines.append(f"{label}: **{score}**")
+            embed.add_field(name="Match scores", value="\n".join(score_lines), inline=False)
+            confidence = _confidence_from_scores(scores, app.selected_squad)
+            embed.add_field(name="Confidence", value=confidence, inline=True)
+        if questionnaire:
+            embed.add_field(name="Questionnaire", value=_format_questionnaire(questionnaire), inline=False)
+
     embed.add_field(
         name="Account created",
         value=discord.utils.format_dt(created, style="F") if created else "Unknown",
@@ -59,7 +156,7 @@ def build_application_embed(
         value=discord.utils.format_dt(joined, style="F") if joined else "Unknown",
         inline=True,
     )
-    if (app.division or "").strip():
+    if (app.division or "").strip() and not app.selected_squad:
         embed.add_field(name="Division", value=app.division, inline=True)
     embed.add_field(name="Gamertag", value=str(answers.get("gamertag", "—")), inline=True)
     embed.add_field(name="Age", value=str(answers.get("age", "—")), inline=True)

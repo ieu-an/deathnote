@@ -1,4 +1,4 @@
-name: Auto Deploy DeathNote Bot
+name: Auto Deploy MultiHost Bot
 
 on:
   push:
@@ -16,4 +16,4 @@ jobs:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
-          script: ~/deploy-bot.sh
+          script: ~/deploy-multihost-bot.sh

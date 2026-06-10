@@ -15,6 +15,8 @@ from typing import Any, Optional
 
 import aiosqlite
 
+from utils.squads import Squad, row_to_squad
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_DB_PATH = Path(__file__).resolve().parent.parent / "data" / "bot.db"
@@ -79,6 +81,11 @@ class Application:
     staff_channel_id: Optional[int]
     thread_id: Optional[int]
     answers_json: str
+    selected_squad: str
+    recommended_squad: str
+    selection_method: str
+    questionnaire_json: str
+    squad_scores_json: str
 
 
 def _row_to_settings(row: aiosqlite.Row) -> GuildSettings:
@@ -120,6 +127,11 @@ def _row_to_application(row: aiosqlite.Row) -> Application:
         staff_channel_id=row["staff_channel_id"],
         thread_id=row["thread_id"],
         answers_json=row["answers_json"] or "{}",
+        selected_squad=str(row["selected_squad"] or "") if "selected_squad" in row.keys() else "",
+        recommended_squad=str(row["recommended_squad"] or "") if "recommended_squad" in row.keys() else "",
+        selection_method=str(row["selection_method"] or "") if "selection_method" in row.keys() else "",
+        questionnaire_json=str(row["questionnaire_json"] or "{}") if "questionnaire_json" in row.keys() else "{}",
+        squad_scores_json=str(row["squad_scores_json"] or "{}") if "squad_scores_json" in row.keys() else "{}",
     )
 
 
@@ -208,6 +220,37 @@ class Database:
         )
         await self._conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_applications_status_interview ON applications(status, interview_started_at)"
+        )
+
+        await self._add_column_if_missing("applications", "selected_squad", "TEXT NOT NULL DEFAULT ''")
+        await self._add_column_if_missing("applications", "recommended_squad", "TEXT NOT NULL DEFAULT ''")
+        await self._add_column_if_missing("applications", "selection_method", "TEXT NOT NULL DEFAULT ''")
+        await self._add_column_if_missing("applications", "questionnaire_json", "TEXT NOT NULL DEFAULT '{}'")
+        await self._add_column_if_missing("applications", "squad_scores_json", "TEXT NOT NULL DEFAULT '{}'")
+
+        await self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS squads (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id INTEGER NOT NULL,
+                key TEXT NOT NULL,
+                name TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
+                emoji TEXT NOT NULL DEFAULT '',
+                role_id INTEGER,
+                leader_role_id INTEGER,
+                channel_id INTEGER,
+                recruiter_role_id INTEGER,
+                games_json TEXT NOT NULL DEFAULT '[]',
+                genres_json TEXT NOT NULL DEFAULT '[]',
+                weights_json TEXT NOT NULL DEFAULT '{}',
+                welcome_message TEXT NOT NULL DEFAULT '',
+                UNIQUE(guild_id, key)
+            )
+            """
+        )
+        await self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_squads_guild ON squads(guild_id)"
         )
 
         await self._conn.execute(
@@ -364,15 +407,38 @@ class Database:
         division: str,
         answers: dict[str, Any],
         submitted_at: Optional[int] = None,
+        selected_squad: str = "",
+        recommended_squad: str = "",
+        selection_method: str = "",
+        questionnaire: Optional[dict[str, Any]] = None,
+        squad_scores: Optional[dict[str, Any]] = None,
     ) -> int:
         ts = submitted_at if submitted_at is not None else int(time.time())
         payload = json.dumps(answers, ensure_ascii=False)
+        questionnaire_payload = json.dumps(questionnaire or {}, ensure_ascii=False)
+        scores_payload = json.dumps(squad_scores or {}, ensure_ascii=False)
         cur = await self._conn.execute(
             """
-            INSERT INTO applications (guild_id, user_id, status, division, submitted_at, answers_json)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO applications (
+                guild_id, user_id, status, division, submitted_at, answers_json,
+                selected_squad, recommended_squad, selection_method,
+                questionnaire_json, squad_scores_json
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (guild_id, user_id, status, division, ts, payload),
+            (
+                guild_id,
+                user_id,
+                status,
+                division,
+                ts,
+                payload,
+                selected_squad,
+                recommended_squad,
+                selection_method,
+                questionnaire_payload,
+                scores_payload,
+            ),
         )
         await self._conn.commit()
         app_id = cur.lastrowid
@@ -522,6 +588,115 @@ class Database:
         cutoff = int(time.time()) - 3600
         await self._conn.execute("DELETE FROM pending_applications WHERE created_at < ?", (cutoff,))
 
+    # --- Squads ---
+
+    async def list_squads(self, guild_id: int) -> list[Squad]:
+        async with self._conn.execute(
+            "SELECT * FROM squads WHERE guild_id = ? ORDER BY name ASC",
+            (guild_id,),
+        ) as cursor:
+            rows = await cursor.fetchall()
+        return [row_to_squad(r) for r in rows]
+
+    async def get_squad_by_key(self, guild_id: int, key: str) -> Optional[Squad]:
+        async with self._conn.execute(
+            "SELECT * FROM squads WHERE guild_id = ? AND key = ?",
+            (guild_id, key.strip().lower()),
+        ) as cursor:
+            row = await cursor.fetchone()
+        return row_to_squad(row) if row else None
+
+    async def get_squad_by_id(self, squad_id: int) -> Optional[Squad]:
+        async with self._conn.execute("SELECT * FROM squads WHERE id = ?", (squad_id,)) as cursor:
+            row = await cursor.fetchone()
+        return row_to_squad(row) if row else None
+
+    async def insert_squad(
+        self,
+        guild_id: int,
+        *,
+        key: str,
+        name: str,
+        description: str = "",
+        emoji: str = "",
+        role_id: Optional[int] = None,
+        leader_role_id: Optional[int] = None,
+        channel_id: Optional[int] = None,
+        recruiter_role_id: Optional[int] = None,
+        games: Optional[list[str]] = None,
+        genres: Optional[list[str]] = None,
+        weights: Optional[dict[str, Any]] = None,
+        welcome_message: str = "",
+    ) -> Squad:
+        games_payload = json.dumps(games or [], ensure_ascii=False)
+        genres_payload = json.dumps(genres or [], ensure_ascii=False)
+        weights_payload = json.dumps(weights or {}, ensure_ascii=False)
+        cur = await self._conn.execute(
+            """
+            INSERT INTO squads (
+                guild_id, key, name, description, emoji,
+                role_id, leader_role_id, channel_id, recruiter_role_id,
+                games_json, genres_json, weights_json, welcome_message
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                guild_id,
+                key.strip().lower(),
+                name,
+                description,
+                emoji,
+                role_id,
+                leader_role_id,
+                channel_id,
+                recruiter_role_id,
+                games_payload,
+                genres_payload,
+                weights_payload,
+                welcome_message,
+            ),
+        )
+        await self._conn.commit()
+        squad_id = cur.lastrowid
+        assert squad_id is not None
+        squad = await self.get_squad_by_id(int(squad_id))
+        assert squad is not None
+        logger.info("Inserted squad key=%s guild=%s", key, guild_id)
+        return squad
+
+    async def update_squad(self, squad_id: int, **fields: Any) -> Optional[Squad]:
+        if not fields:
+            return await self.get_squad_by_id(squad_id)
+
+        columns: list[str] = []
+        values: list[Any] = []
+        for key, value in fields.items():
+            if key not in _ALLOWED_SQUAD_COLUMNS:
+                raise ValueError(f"Unknown squads column: {key}")
+            if key in ("games_json", "genres_json", "weights_json") and not isinstance(value, str):
+                columns.append(f"{key} = ?")
+                values.append(json.dumps(value, ensure_ascii=False))
+            else:
+                columns.append(f"{key} = ?")
+                values.append(value)
+
+        values.append(squad_id)
+        await self._conn.execute(
+            f"UPDATE squads SET {', '.join(columns)} WHERE id = ?",
+            values,
+        )
+        await self._conn.commit()
+        logger.info("Updated squad id=%s fields=%s", squad_id, list(fields.keys()))
+        return await self.get_squad_by_id(squad_id)
+
+    async def delete_squad(self, guild_id: int, key: str) -> bool:
+        cur = await self._conn.execute(
+            "DELETE FROM squads WHERE guild_id = ? AND key = ?",
+            (guild_id, key.strip().lower()),
+        )
+        await self._conn.commit()
+        return (cur.rowcount or 0) > 0
+
     # --- Division routes ---
 
     async def list_division_routes(self, guild_id: int) -> list[tuple[int, str, int]]:
@@ -611,5 +786,22 @@ _ALLOWED_GUILD_COLUMNS = frozenset(
         "interview_category_id",
         "staff_role_panel_channel_id",
         "staff_role_panel_message_id",
+    }
+)
+
+_ALLOWED_SQUAD_COLUMNS = frozenset(
+    {
+        "key",
+        "name",
+        "description",
+        "emoji",
+        "role_id",
+        "leader_role_id",
+        "channel_id",
+        "recruiter_role_id",
+        "games_json",
+        "genres_json",
+        "weights_json",
+        "welcome_message",
     }
 )

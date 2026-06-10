@@ -15,6 +15,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from cogs.interview import InterviewClaimView
+from cogs.squad_selection import SquadContext, start_squad_selection
 from utils.checks import ensure_admin_or_botmod, ensure_staff
 from utils.database import (
     STATUS_ACCEPTED,
@@ -25,9 +26,11 @@ from utils.database import (
     Database,
 )
 from utils.branding import BRAND_EMBED_COLOR, BRAND_THUMBNAIL_URL, brand_user_embed
-from utils.ping_helpers import staff_application_ping
+from utils.ping_helpers import staff_application_ping, squad_recruiter_ping
 from utils.recruitment_embeds import build_application_embed, parse_answers, send_log_embed
 from utils.time_utils import EASTERN, format_eastern_timestamp
+
+from utils.squads import Squad, squad_by_key
 
 logger = logging.getLogger(__name__)
 
@@ -115,6 +118,16 @@ RECRUIT_INTERVIEW_ID = "recruit_interview_v1"
 class VerificationModal(discord.ui.Modal, title="Verification"):
     """Five TextInputs (Discord max)."""
 
+    def __init__(
+        self,
+        *,
+        squad_context: Optional[SquadContext] = None,
+        squads: Optional[list[Squad]] = None,
+    ) -> None:
+        super().__init__()
+        self._squad_context = squad_context
+        self._squads = squads or []
+
     gamertag = discord.ui.TextInput(
         label="What is your Gamertag?",
         style=discord.TextStyle.short,
@@ -191,7 +204,29 @@ class VerificationModal(discord.ui.Modal, title="Verification"):
             )
             return
 
-        if not settings.staff_channel_id:
+        squad_context = self._squad_context
+        selected_squad_key = ""
+        recommended_squad_key = ""
+        selection_method = ""
+        questionnaire: dict = {}
+        squad_scores: dict = {}
+        division = ""
+        selected_squad: Optional[Squad] = None
+        squads = list(self._squads)
+
+        if squad_context:
+            selected_squad_key = squad_context.selected_squad_key
+            recommended_squad_key = squad_context.recommended_squad_key
+            selection_method = squad_context.selection_method
+            questionnaire = dict(squad_context.questionnaire)
+            squad_scores = dict(squad_context.squad_scores)
+            if not squads and interaction.guild:
+                squads = await db.list_squads(interaction.guild.id)
+            selected_squad = squad_by_key(squads, selected_squad_key)
+            if selected_squad:
+                division = selected_squad.name
+
+        if not settings.staff_channel_id and not squad_context:
             await interaction.response.send_message(
                 embed=discord.Embed(
                     title="Not configured",
@@ -210,17 +245,28 @@ class VerificationModal(discord.ui.Modal, title="Verification"):
             "why_join": str(self.why_join.value),
         }
 
-        staff_ch = interaction.guild.get_channel(settings.staff_channel_id)
+        staff_ch_id = settings.staff_channel_id
+        if selected_squad and selected_squad.channel_id:
+            staff_ch_id = selected_squad.channel_id
+        elif interaction.guild and division:
+            routed = await db.resolve_division_channel(interaction.guild.id, division)
+            if routed:
+                staff_ch_id = routed
+
+        staff_ch = interaction.guild.get_channel(staff_ch_id) if staff_ch_id else None
         if not isinstance(staff_ch, discord.TextChannel):
             await interaction.response.send_message(
                 embed=discord.Embed(
                     title="Invalid channel",
-                    description="Staff review channel is missing or not a text channel. Ask an admin to run `/setstaffchannel`.",
+                    description="Staff review channel is missing or not a text channel. Ask an admin to configure routing.",
                     color=discord.Color.red(),
                 ),
                 ephemeral=True,
             )
             return
+
+        if not squads and interaction.guild:
+            squads = await db.list_squads(interaction.guild.id)
 
         await interaction.response.defer(ephemeral=True)
 
@@ -228,8 +274,13 @@ class VerificationModal(discord.ui.Modal, title="Verification"):
             interaction.guild.id,
             interaction.user.id,
             status=STATUS_SUBMITTED,
-            division="",
+            division=division,
             answers=answers,
+            selected_squad=selected_squad_key,
+            recommended_squad=recommended_squad_key,
+            selection_method=selection_method,
+            questionnaire=questionnaire,
+            squad_scores=squad_scores,
         )
         app = await db.get_application_by_id(app_id)
         assert app is not None
@@ -244,9 +295,21 @@ class VerificationModal(discord.ui.Modal, title="Verification"):
             user=user,
             status_line=status_line,
             color=discord.Color.blurple(),
+            squads=squads or None,
         )
 
         ping_content, ping_allowed = staff_application_ping(settings)
+        recruiter_ping = squad_recruiter_ping(selected_squad)
+        if recruiter_ping:
+            ping_content = f"{ping_content} {recruiter_ping}".strip()
+            role_ids: list[discord.Object] = []
+            if ping_allowed and ping_allowed.roles:
+                role_ids.extend(ping_allowed.roles)
+            if selected_squad and selected_squad.recruiter_role_id:
+                role_ids.append(discord.Object(id=selected_squad.recruiter_role_id))
+            if role_ids:
+                ping_allowed = discord.AllowedMentions(roles=role_ids)
+
         ping_content = ping_content.strip()
         view = StaffDecisionView()
 
@@ -436,6 +499,17 @@ async def _apply_accept(
             except discord.HTTPException:
                 logger.exception("Could not add accepted role")
 
+    squad: Optional[Squad] = None
+    if app.selected_squad:
+        squad = await db.get_squad_by_key(guild.id, app.selected_squad)
+        if squad and squad.role_id:
+            squad_role = guild.get_role(squad.role_id)
+            if squad_role:
+                try:
+                    await member.add_roles(squad_role, reason=f"Recruitment accepted — {squad.name}")
+                except discord.HTTPException:
+                    logger.exception("Could not add squad role")
+
     if settings.unverified_role_id:
         ur = guild.get_role(settings.unverified_role_id)
         if ur and ur in member.roles:
@@ -446,12 +520,23 @@ async def _apply_accept(
 
     await _remove_interview_role_if_present(guild, member, settings, reason="Interview concluded — accepted")
 
+    welcome_title = "Application Accepted"
+    welcome_body = (
+        "You have been accepted. You can now access the server.\n\n"
+        "Please check the server rules to ensure you are prepared for the new world."
+    )
+    if squad:
+        welcome_title = f"Welcome to {squad.name}"
+        if squad.welcome_message.strip():
+            welcome_body = squad.welcome_message.strip()
+        else:
+            welcome_body = f"Welcome to **{squad.name}**. You have been accepted into the squad."
+
     try:
         await member.send(
             embed=brand_user_embed(
-                title="Application to Deathnote Accepted",
-                description="You have been accepted. You can now access the server.\n\n"
-                "Please check the server rules to ensure you are prepared for the new world",
+                title=welcome_title,
+                description=welcome_body,
             )
         )
     except discord.HTTPException:
@@ -472,14 +557,15 @@ async def _apply_accept(
     )
 
     await interaction.followup.send(embed=discord.Embed(title="Accepted", description="Applicant processed.", color=discord.Color.green()), ephemeral=True)
+    squad_note = f" — squad **{squad.name}**" if squad else ""
     await send_log_embed(
         guild,
         settings,
         "Application accepted",
-        f"Application `#{app.id}` — applicant {member.mention} — accepted by {staff.mention}",
+        f"Application `#{app.id}` — applicant {member.mention} — accepted by {staff.mention}{squad_note}",
         discord.Color.green(),
     )
-    logger.info("Accept: app %s by staff %s", app.id, staff.id)
+    logger.info("Accept: app %s by staff %s squad=%s", app.id, staff.id, app.selected_squad or "none")
 
 
 async def _apply_deny(
@@ -944,7 +1030,16 @@ class VerificationView(discord.ui.View):
         interaction: discord.Interaction,
         button: discord.ui.Button,
     ) -> None:
-        await interaction.response.send_modal(VerificationModal())
+        if not interaction.guild:
+            await interaction.response.send_modal(VerificationModal())
+            return
+
+        db: Database = interaction.client.db  # type: ignore[attr-defined]
+        squads = await db.list_squads(interaction.guild.id)
+        if squads:
+            await start_squad_selection(interaction, db, squads)
+        else:
+            await interaction.response.send_modal(VerificationModal())
 
 
 async def setup(bot: commands.Bot) -> None:

@@ -7,6 +7,7 @@ from typing import Optional, Tuple
 import discord
 
 from utils.database import GuildSettings
+from utils.squads import Squad
 from utils.time_utils import is_within_ping_window
 
 
@@ -43,6 +44,13 @@ def staff_application_ping(settings: GuildSettings) -> Tuple[str, Optional[disco
 
     mention = f"<@&{rid}>"
     return mention, discord.AllowedMentions(roles=[discord.Object(id=rid)])
+
+
+def squad_recruiter_ping(squad: Optional[Squad]) -> str:
+    """Return a recruiter role mention for the applicant's chosen squad, if configured."""
+    if squad is None or squad.recruiter_role_id is None:
+        return ""
+    return f"<@&{squad.recruiter_role_id}>"
 
 
 def staff_ping_suffix(settings: GuildSettings) -> str:
